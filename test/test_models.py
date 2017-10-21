@@ -1,21 +1,96 @@
 import argparse
 import copy
 import unittest
-
+import onmt
 import torch
+
 from torch.autograd import Variable
 
-import onmt
-import opts
-from onmt.ModelConstructor import make_embeddings, \
-                            make_encoder, make_decoder
+# This will be redundant with #104 pull. Can simply include the parameter file
 
 parser = argparse.ArgumentParser(description='train.py')
-opts.model_opts(parser)
-opts.train_opts(parser)
 
-# -data option is required, but not used in this test, so dummy.
-opt = parser.parse_known_args(['-data', 'dummy'])[0]
+parser.add_argument('-layers', type=int, default=2,
+                    help='Number of layers in the LSTM encoder/decoder')
+parser.add_argument('-rnn_size', type=int, default=500,
+                    help='Size of LSTM hidden states')
+parser.add_argument('-word_vec_size', type=int, default=500,
+                    help='Word embedding sizes')
+parser.add_argument('-feat_vec_size', type=int, default=100,
+                    help='Feature vec sizes')
+parser.add_argument('-feat_merge', type=str, default='concat',
+                    choices=['concat', 'sum', 'mlp'],
+                    help='Merge action for the features embeddings')
+parser.add_argument('-feat_vec_exponent', type=float, default=0.7,
+                    help="""When features embedding sizes are not set and
+                    using -feat_merge concat, their dimension will be set
+                    to N^feat_vec_exponent where N is the number of values
+                    the feature takes""")
+parser.add_argument('-input_feed', type=int, default=1,
+                    help="""Feed the context vector at each time step as
+                    additional input (via concatenation with the word
+                    embeddings) to the decoder.""")
+parser.add_argument('-rnn_type', type=str, default='LSTM',
+                    choices=['LSTM', 'GRU'],
+                    help="""The gate type to use in the RNNs""")
+parser.add_argument('-brnn', action='store_true',
+                    help='Use a bidirectional encoder')
+parser.add_argument('-brnn_merge', default='concat',
+                    help="""Merge action for the bidirectional hidden states:
+                    [concat|sum]""")
+parser.add_argument('-copy_attn', action="store_true",
+                    help='Train copy attention layer.')
+parser.add_argument('-coverage_attn', action="store_true",
+                    help='Train a coverage attention layer.')
+parser.add_argument('-lambda_coverage', type=float, default=1,
+                    help='Lambda value for coverage.')
+
+parser.add_argument('-encoder_layer', type=str, default='rnn',
+                    help="""Type of encoder layer to use.
+                    Options: [rnn|mean|transformer]""")
+parser.add_argument('-decoder_layer', type=str, default='rnn',
+                    help='Type of decoder layer to use. [rnn|transformer]')
+parser.add_argument('-context_gate', type=str, default=None,
+                    choices=['source', 'target', 'both'],
+                    help="""Type of context gate to use [source|target|both].
+                    Do not select for no context gate.""")
+parser.add_argument('-attention_type', type=str, default='dot',
+                    choices=['dot', 'general', 'mlp'],
+                    help="""The attention type to use:
+                    dotprot (Luong) or MLP (Bahdanau)""")
+
+# Optimization options
+parser.add_argument('-encoder_type', default='text',
+                    help="Type of encoder to use. Options are [text|img].")
+parser.add_argument('-batch_size', type=int, default=64,
+                    help='Maximum batch size')
+parser.add_argument('-max_generator_batches', type=int, default=32,
+                    help="""Maximum batches of words in a sequence to run
+                    the generator on in parallel. Higher is faster, but uses
+                    more memory.""")
+parser.add_argument('-epochs', type=int, default=13,
+                    help='Number of training epochs')
+parser.add_argument('-start_epoch', type=int, default=1,
+                    help='The epoch from which to start')
+parser.add_argument('-param_init', type=float, default=0.1,
+                    help="""Parameters are initialized over uniform distribution
+                    with support (-param_init, param_init).
+                    Use 0 to not use initialization""")
+parser.add_argument('-optim', default='sgd',
+                    help="Optimization method. [sgd|adagrad|adadelta|adam]")
+parser.add_argument('-max_grad_norm', type=float, default=5,
+                    help="""If the norm of the gradient vector exceeds this,
+                    renormalize it to have the norm equal to max_grad_norm""")
+parser.add_argument('-dropout', type=float, default=0.3,
+                    help='Dropout probability; applied between LSTM stacks.')
+parser.add_argument('-position_encoding', action='store_true',
+                    help='Use a sinusoid to mark relative words positions.')
+parser.add_argument('-share_decoder_embeddings', action='store_true',
+                    help='Share the word and softmax embeddings for decoder.')
+parser.add_argument('-gpus', default=[], nargs='+', type=int,
+                    help="Use CUDA on the listed devices.")
+
+opt = parser.parse_known_args()[0]
 print(opt)
 
 
@@ -28,15 +103,14 @@ class TestModel(unittest.TestCase):
     # Helper to generate a vocabulary
 
     def get_vocab(self):
-        src = onmt.IO.ONMTDataset.get_fields()["src"]
-        src.build_vocab([])
-        return src.vocab
+        return onmt.Dict([onmt.Constants.PAD_WORD, onmt.Constants.UNK_WORD,
+                          onmt.Constants.BOS_WORD, onmt.Constants.EOS_WORD])
 
     def get_batch(self, sourceL=3, bsize=1):
         # len x batch x nfeat
         test_src = Variable(torch.ones(sourceL, bsize, 1)).long()
-        test_tgt = Variable(torch.ones(sourceL, bsize, 1)).long()
-        test_length = torch.ones(bsize).fill_(sourceL)
+        test_tgt = Variable(torch.ones(sourceL, bsize)).long()
+        test_length = Variable(torch.ones(1, bsize).fill_(sourceL))
         return test_src, test_tgt, test_length
 
     def embeddings_forward(self, opt, sourceL=3, bsize=1):
@@ -48,18 +122,17 @@ class TestModel(unittest.TestCase):
             sourceL: Length of generated input sentence
             bsize: Batchsize of generated input
         '''
-        word_dict = self.get_vocab()
-        feature_dicts = []
-        emb = make_embeddings(opt, word_dict, feature_dicts)
+        vocab = self.get_vocab()
+        emb = onmt.Models.Embeddings(opt, vocab)
         test_src, _, __ = self.get_batch(sourceL=sourceL,
                                          bsize=bsize)
-        if opt.decoder_type == 'transformer':
+        if opt.decoder_layer == 'transformer':
             input = torch.cat([test_src, test_src], 0)
             res = emb(input)
-            compare_to = torch.zeros(sourceL * 2, bsize, opt.src_word_vec_size)
+            compare_to = torch.zeros(sourceL*2, bsize, opt.word_vec_size)
         else:
             res = emb(test_src)
-            compare_to = torch.zeros(sourceL, bsize, opt.src_word_vec_size)
+            compare_to = torch.zeros(sourceL, bsize, opt.word_vec_size)
 
         self.assertEqual(res.size(), compare_to.size())
 
@@ -72,10 +145,8 @@ class TestModel(unittest.TestCase):
             sourceL: Length of generated input sentence
             bsize: Batchsize of generated input
         '''
-        word_dict = self.get_vocab()
-        feature_dicts = []
-        embeddings = make_embeddings(opt, word_dict, feature_dicts)
-        enc = make_encoder(opt, embeddings)
+        vocab = self.get_vocab()
+        enc = onmt.Models.Encoder(opt, vocab)
 
         test_src, test_tgt, test_length = self.get_batch(sourceL=sourceL,
                                                          bsize=bsize)
@@ -83,7 +154,7 @@ class TestModel(unittest.TestCase):
         hidden_t, outputs = enc(test_src, test_length)
 
         # Initialize vectors to compare size with
-        test_hid = torch.zeros(self.opt.enc_layers, bsize, opt.rnn_size)
+        test_hid = torch.zeros(self.opt.layers, bsize, opt.rnn_size)
         test_out = torch.zeros(sourceL, bsize, opt.rnn_size)
 
         # Ensure correct sizes and types
@@ -104,16 +175,9 @@ class TestModel(unittest.TestCase):
             sourceL: length of input sequence
             bsize: batchsize
         """
-        word_dict = self.get_vocab()
-        feature_dicts = []
-
-        embeddings = make_embeddings(opt, word_dict, feature_dicts)
-        enc = make_encoder(opt, embeddings)
-
-        embeddings = make_embeddings(opt, word_dict, feature_dicts,
-                                     for_encoder=False)
-        dec = make_decoder(opt, embeddings)
-
+        vocab = self.get_vocab()
+        enc = onmt.Models.Encoder(opt, vocab)
+        dec = onmt.Models.Decoder(opt, vocab)
         model = onmt.Models.NMTModel(enc, dec)
 
         test_src, test_tgt, test_length = self.get_batch(sourceL=sourceL,
@@ -121,7 +185,7 @@ class TestModel(unittest.TestCase):
         outputs, attn, _ = model(test_src,
                                  test_tgt,
                                  test_length)
-        outputsize = torch.zeros(sourceL - 1, bsize, opt.rnn_size)
+        outputsize = torch.zeros(sourceL-1, bsize, opt.rnn_size)
         # Make sure that output has the correct size and type
         self.assertEqual(outputs.size(), outputsize.size())
         self.assertEqual(type(outputs), torch.autograd.Variable)
@@ -158,15 +222,15 @@ TEST PARAMETERS
 '''
 
 test_embeddings = [[],
-                   [('decoder_type', 'transformer')]
+                   [('decoder_layer', 'transformer')]
                    ]
 
 for p in test_embeddings:
     _add_test(p, 'embeddings_forward')
 
 tests_encoder = [[],
-                 [('encoder_type', 'mean')],
-                 # [('encoder_type', 'transformer'),
+                 [('encoder_layer', 'mean')],
+                 # [('encoder_layer', 'transformer'),
                  # ('word_vec_size', 16), ('rnn_size', 16)],
                  []
                  ]
@@ -177,38 +241,39 @@ for p in tests_encoder:
 tests_ntmodel = [[('rnn_type', 'GRU')],
                  [('layers', 10)],
                  [('input_feed', 0)],
-                 [('decoder_type', 'transformer'),
-                  ('encoder_type', 'transformer'),
-                  ('src_word_vec_size', 16),
-                  ('tgt_word_vec_size', 16),
+                 [('decoder_layer', 'transformer'),
+                  ('encoder_layer', 'transformer'),
+                  ('word_vec_size', 16),
                   ('rnn_size', 16)],
-                 # [('encoder_type', 'transformer'),
+                 # [('encoder_layer', 'transformer'),
                  #  ('word_vec_size', 16),
                  #  ('rnn_size', 16)],
-                 [('decoder_type', 'transformer'),
-                  ('encoder_type', 'transformer'),
-                  ('src_word_vec_size', 16),
-                  ('tgt_word_vec_size', 16),
-                  ('rnn_size', 16),
-                  ('position_encoding', True)],
+                 [('decoder_layer', 'transformer'),
+                  ('word_vec_size', 16),
+                  ('rnn_size', 16)],
                  [('coverage_attn', True)],
                  [('copy_attn', True)],
-                 [('global_attention', 'mlp')],
+                 [('attention_type', 'mlp')],
                  [('context_gate', 'both')],
                  [('context_gate', 'target')],
                  [('context_gate', 'source')],
-                 [('encoder_type', "brnn"),
+                 [('brnn', True),
                   ('brnn_merge', 'sum')],
-                 [('encoder_type', "brnn")],
-                 [('decoder_type', 'cnn'),
-                  ('encoder_type', 'cnn')],
+                 [('brnn', True)],
                  []
                  ]
 
-if onmt.modules.check_sru_requirement():
-    """ Only do SRU test if requirment is safisfied. """
-    # SRU doesn't support input_feed.
-    tests_ntmodel.append([('rnn_type', 'SRU'), ('input_feed', 0)])
-
 for p in tests_ntmodel:
     _add_test(p, 'ntmmodel_forward')
+
+
+def suite():
+    # Initialize Testsuite
+    suite = unittest.TestLoader().loadTestsFromTestCase(TestModel)
+
+    return suite
+
+
+if __name__ == '__main__':
+    # Run Test
+    unittest.TextTestRunner(verbosity=2).run(suite())
