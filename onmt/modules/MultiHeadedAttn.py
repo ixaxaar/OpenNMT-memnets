@@ -1,43 +1,28 @@
-import math
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
-
-from onmt.Utils import aeq
-from onmt.modules.UtilClass import BottleLinear, \
-                    BottleLayerNorm, BottleSoftmax
+from onmt.modules.Util import BottleLinear, BottleLayerNorm, BottleSoftmax
+import math
+from onmt.modules import aeq
 
 
 class MultiHeadedAttention(nn.Module):
-    ''' Multi-Head Attention module from
-        "Attention is All You Need".
-    '''
-    def __init__(self, head_count, model_dim, p=0.1):
-        """
-        Args:
-            head_count(int): number of parallel heads.
-            model_dim(int): the dimension of keys/values/queries in this
-                MultiHeadedAttention, must be divisible by head_count.
-        """
-        assert model_dim % head_count == 0
-        self.dim_per_head = model_dim // head_count
-        self.model_dim = model_dim
+    ''' Multi-Head Attention module '''
+
+    def __init__(self, n_head, d_model, p=0.1):
+        self.d_k = d_model // n_head
+        self.d_model = d_model
 
         super(MultiHeadedAttention, self).__init__()
-        self.head_count = head_count
+        heads = self.heads = n_head
 
-        self.linear_keys = BottleLinear(model_dim,
-                                        head_count * self.dim_per_head,
-                                        bias=False)
-        self.linear_values = BottleLinear(model_dim,
-                                          head_count * self.dim_per_head,
+        self.linear_keys = BottleLinear(d_model, heads * self.d_k, bias=False)
+        self.linear_values = BottleLinear(d_model, heads * self.d_k,
                                           bias=False)
-        self.linear_query = BottleLinear(model_dim,
-                                         head_count * self.dim_per_head,
-                                         bias=False)
+        self.linear_query = BottleLinear(d_model, heads * self.d_k, bias=False)
         self.sm = BottleSoftmax()
         self.activation = nn.ReLU()
-        self.layer_norm = BottleLayerNorm(model_dim)
+        self.layer_norm = BottleLayerNorm(d_model)
         self.dropout = nn.Dropout(p)
         self.res_dropout = nn.Dropout(p)
 
@@ -51,7 +36,7 @@ class MultiHeadedAttention(nn.Module):
         batch_, q_len, d_ = query.size()
         aeq(batch, batch_)
         aeq(d, d_)
-        aeq(self.model_dim % 8, 0)
+        aeq(self.d_model % 8, 0)
         if mask is not None:
             batch_, q_len_, k_len_ = mask.size()
             aeq(batch_, batch)
@@ -61,15 +46,14 @@ class MultiHeadedAttention(nn.Module):
 
         def shape_projection(x):
             b, l, d = x.size()
-            return x.view(b, l, self.head_count, self.dim_per_head) \
-                .transpose(1, 2).contiguous() \
-                .view(b * self.head_count, l, self.dim_per_head)
+            return x.view(b, l, self.heads, self.d_k).transpose(1, 2) \
+                    .contiguous().view(b * self.heads, l, self.d_k)
 
         def unshape_projection(x, q):
             b, l, d = q.size()
-            return x.view(b, self.head_count, l, self.dim_per_head) \
+            return x.view(b, self.heads, l, self.d_k) \
                     .transpose(1, 2).contiguous() \
-                    .view(b, l, self.head_count * self.dim_per_head)
+                    .view(b, l, self.heads * self.d_k)
 
         residual = query
         key_up = shape_projection(self.linear_keys(key))
@@ -77,25 +61,19 @@ class MultiHeadedAttention(nn.Module):
         query_up = shape_projection(self.linear_query(query))
 
         scaled = torch.bmm(query_up, key_up.transpose(1, 2))
-        scaled = scaled / math.sqrt(self.dim_per_head)
-        bh, l, dim_per_head = scaled.size()
-        b = bh // self.head_count
-        if mask is not None:
+        scaled = scaled / math.sqrt(self.d_k)
 
-            scaled = scaled.view(b, self.head_count, l, dim_per_head)
+        if mask is not None:
+            bh, l, d_k = scaled.size()
+            b = bh // self.heads
+            scaled = scaled.view(b, self.heads, l, d_k)
             mask = mask.unsqueeze(1).expand_as(scaled)
             scaled = scaled.masked_fill(Variable(mask), -float('inf')) \
-                           .view(bh, l, dim_per_head)
-        attn = self.sm(scaled)
-        # Return one attn
-        top_attn = attn \
-            .view(b, self.head_count, l, dim_per_head)[:, 0, :, :] \
-            .contiguous()
-
-        drop_attn = self.dropout(self.sm(scaled))
+                           .view(bh, l, d_k)
+        attn = self.dropout(self.sm(scaled))
 
         # values : (batch * 8) x qlen x dim
-        out = unshape_projection(torch.bmm(drop_attn, value_up), residual)
+        out = unshape_projection(torch.bmm(attn, value_up), residual)
 
         # Residual and layer norm
         res = self.res_dropout(out) + residual
@@ -107,4 +85,4 @@ class MultiHeadedAttention(nn.Module):
         aeq(batch, batch_)
         aeq(d, d_)
         # END CHECK
-        return ret, top_attn
+        return ret, attn
