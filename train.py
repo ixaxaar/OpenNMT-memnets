@@ -47,12 +47,12 @@ parser.add_argument('-feat_vec_exponent', type=float, default=0.7,
                     help="""When using -feat_merge concat, feature embedding
                     sizes will be set to N^feat_vec_exponent where N is the
                     number of values the feature takes.""")
-parser.add_argument('-input_feed', type=int, default=1,
+parser.add_argument('-input_feed', type=int, default=0,
                     help="""Feed the context vector at each time step as
                     additional input (via concatenation with the word
                     embeddings) to the decoder.""")
 parser.add_argument('-rnn_type', type=str, default='LSTM',
-                    choices=['LSTM', 'GRU'],
+                    choices=['LSTM', 'GRU', 'DNC'],
                     help="""The gate type to use in the RNNs""")
 # parser.add_argument('-residual',   action="store_true",
 #                     help="Add residual connections between RNN layers.")
@@ -169,6 +169,11 @@ parser.add_argument('-experiment_name', type=str, default="",
 parser.add_argument('-seed', type=int, default=-1,
                     help="""Random seed used for the experiments
                     reproducibility.""")
+
+# DNC arguments
+parser.add_argument('--nr_cells', type=int, default=4, help='Number of memory cells of the DNC')
+parser.add_argument('--read_heads', type=int, default=4, help='Number of read heads of the DNC')
+parser.add_argument('--cell_size', type=int, default=500, help='Cell sizes of DNC')
 
 opt = parser.parse_args()
 
@@ -388,7 +393,7 @@ def main():
         if opt.share_decoder_embeddings:
             generator[0].weight = decoder.embeddings.word_lut.weight
 
-    model = onmt.Models.NMTModel(encoder, decoder, len(opt.gpus) > 1)
+    model = onmt.Models.NMTModel(encoder, decoder, opt, len(opt.gpus) > 1)
 
     if opt.train_from:
         print('Loading model from checkpoint at %s' % opt.train_from)

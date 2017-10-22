@@ -4,11 +4,11 @@ import torch.nn as nn
 from torch.autograd import Variable
 import onmt
 import onmt.modules
+from onmt.modules import DNC
 from onmt.modules import aeq
 from onmt.modules.Gate import ContextGateFactory
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 from torch.nn.utils.rnn import pack_padded_sequence as pack
-
 
 class Embeddings(nn.Module):
     def __init__(self, opt, dicts, feature_dicts=None):
@@ -134,8 +134,10 @@ class Encoder(nn.Module):
         """
         # Number of rnn layers.
         self.layers = opt.layers
+        self.rnn_type = opt.rnn_type
 
         # Use a bidirectional model.
+        assert not (opt.rnn_type == 'DNC' and opt.brnn), 'DNC cannot be bidirectional'
         self.num_directions = 2 if opt.brnn else 1
         assert opt.rnn_size % self.num_directions == 0
 
@@ -155,11 +157,24 @@ class Encoder(nn.Module):
                 [onmt.modules.TransformerEncoder(self.hidden_size, opt)
                  for i in range(opt.layers)])
         else:
-            self.rnn = getattr(nn, opt.rnn_type)(
-                 input_size, self.hidden_size,
-                 num_layers=opt.layers,
-                 dropout=opt.dropout,
-                 bidirectional=opt.brnn)
+            if opt.rnn_type == 'DNC':
+                self.rnn = DNC(
+                    'lstm',
+                    hidden_size=self.hidden_size,
+                    num_layers=opt.layers,
+                    nr_cells=opt.nr_cells,
+                    read_heads=opt.read_heads,
+                    cell_size=opt.cell_size,
+                    gpu_id=opt.gpus[0],
+                    independent_linears=True,
+                    batch_first=False
+                )
+            else:
+                self.rnn = getattr(nn, opt.rnn_type)(
+                     input_size, self.hidden_size,
+                     num_layers=opt.layers,
+                     dropout=opt.dropout,
+                     bidirectional=opt.brnn)
 
     def forward(self, input, lengths=None, hidden=None):
         """
@@ -198,12 +213,12 @@ class Encoder(nn.Module):
         else:
             # Standard RNN encoder.
             packed_emb = emb
-            if lengths is not None:
+            if lengths is not None and self.rnn_type != 'DNC':
                 # Lengths data is wrapped inside a Variable.
                 lengths = lengths.data.view(-1).tolist()
                 packed_emb = pack(emb, lengths)
             outputs, hidden_t = self.rnn(packed_emb, hidden)
-            if lengths:
+            if lengths is not None and self.rnn_type != 'DNC':
                 outputs = unpack(outputs)[0]
             return hidden_t, outputs
 
@@ -224,6 +239,7 @@ class Decoder(nn.Module):
         self._coverage = opt.coverage_attn
         self.hidden_size = opt.rnn_size
         self.input_feed = opt.input_feed
+        self.rnn_type = opt.rnn_type
         input_size = opt.word_vec_size
         if self.input_feed:
             input_size += opt.rnn_size
@@ -236,12 +252,25 @@ class Decoder(nn.Module):
                 [onmt.modules.TransformerDecoder(self.hidden_size, opt)
                  for _ in range(opt.layers)])
         else:
-            if opt.rnn_type == "LSTM":
-                stackedCell = onmt.modules.StackedLSTM
+            if opt.rnn_type == 'DNC':
+                self.rnn = DNC(
+                    'lstm',
+                    hidden_size=input_size,
+                    num_layers=opt.layers,
+                    nr_cells=opt.nr_cells,
+                    read_heads=opt.read_heads,
+                    cell_size=opt.cell_size,
+                    gpu_id=opt.gpus[0],
+                    independent_linears=True,
+                    batch_first=False
+                )
             else:
-                stackedCell = onmt.modules.StackedGRU
-            self.rnn = stackedCell(opt.layers, input_size,
-                                   opt.rnn_size, opt.dropout)
+                if opt.rnn_type == "LSTM":
+                    stackedCell = onmt.modules.StackedLSTM
+                else:
+                    stackedCell = onmt.modules.StackedGRU
+                self.rnn = stackedCell(opt.layers, input_size,
+                                       opt.rnn_size, opt.dropout)
             self.context_gate = None
             if opt.context_gate is not None:
                 self.context_gate = ContextGateFactory(
@@ -324,7 +353,7 @@ class Decoder(nn.Module):
                 attns["copy"] = attn
             state = TransformerDecoderState(input.unsqueeze(2))
         else:
-            assert isinstance(state, RNNDecoderState)
+            assert isinstance(state, RNNDecoderState) or isinstance(state, DNCDecoderState)
             output = state.input_feed.squeeze(0)
             hidden = state.hidden
             # CHECKS
@@ -341,7 +370,11 @@ class Decoder(nn.Module):
                 if self.input_feed:
                     emb_t = torch.cat([emb_t, output], 1)
 
+                if self.rnn_type == 'DNC':
+                    emb_t = emb_t.unsqueeze(0)
                 rnn_output, hidden = self.rnn(emb_t, hidden)
+                if self.rnn_type == 'DNC':
+                    rnn_output = rnn_output.squeeze(0)
                 attn_output, attn = self.attn(rnn_output,
                                               context.transpose(0, 1))
                 if self.context_gate is not None:
@@ -365,9 +398,14 @@ class Decoder(nn.Module):
                     _, copy_attn = self.copy_attn(output,
                                                   context.transpose(0, 1))
                     attns["copy"] += [copy_attn]
-            state = RNNDecoderState(hidden, output.unsqueeze(0),
+            if self.rnn_type == 'DNC':
+                state = DNCDecoderState(hidden, output.unsqueeze(0),
                                     coverage.unsqueeze(0)
                                     if coverage is not None else None)
+            else:
+                state = RNNDecoderState(hidden, output.unsqueeze(0),
+                                        coverage.unsqueeze(0)
+                                        if coverage is not None else None)
             outputs = torch.stack(outputs)
             for k in attns:
                 attns[k] = torch.stack(attns[k])
@@ -375,11 +413,12 @@ class Decoder(nn.Module):
 
 
 class NMTModel(nn.Module):
-    def __init__(self, encoder, decoder, multigpu=False):
+    def __init__(self, encoder, decoder, opt, multigpu=False):
         self.multigpu = multigpu
         super(NMTModel, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
+        self.opt = opt
 
     def _fix_enc_hidden(self, h):
         """
@@ -393,6 +432,19 @@ class NMTModel(nn.Module):
     def init_decoder_state(self, context, enc_hidden):
         if self.decoder.decoder_layer == "transformer":
             return TransformerDecoderState()
+        elif self.decoder.rnn_type == 'DNC':
+            if self.encoder.rnn_type == 'DNC':
+                if self.opt.input_feed:
+                    # todo: we assume here that the encoder's output size would be
+                    # same as decoder output size
+                    enc_controller_hidden = \
+                        tuple([ torch.cat((x, Variable(x.data.new(x.size()).zero_(), requires_grad=False)), -1) \
+                            for x in enc_hidden[0] ])
+                    enc_hidden = (enc_controller_hidden, enc_hidden[1], enc_hidden[2])
+                dec = DNCDecoderState(enc_hidden)
+            else:
+                dec = RNNDecoderState(tuple([self._fix_enc_hidden(enc_hidden[i])
+                                         for i in range(len(enc_hidden))]))
         elif isinstance(enc_hidden, tuple):
             dec = RNNDecoderState(tuple([self._fix_enc_hidden(enc_hidden[i])
                                          for i in range(len(enc_hidden))]))
@@ -470,6 +522,37 @@ class RNNDecoderState(DecoderState):
         self.hidden = tuple(vars[:-1])
         self.input_feed = vars[-1]
         self.all = self.hidden + (self.input_feed,)
+
+class DNCDecoderState(DecoderState):
+    def __init__(self, rnnstate, input_feed=None, coverage=None):
+        # all objects are X x batch x dim
+        # or X x (beam * sent) for beam search
+        self.hidden = rnnstate
+        self.input_feed = input_feed
+        self.coverage = coverage
+        self.all = (self.hidden[0],) + (self.input_feed,)
+
+    def detach(self):
+        for h in self.all:
+            if h is not None:
+                if type(h) is tuple:
+                    tuple([ x.detach_() for x in h ])
+                else:
+                    h.detach_()
+
+    def init_input_feed(self, context, rnn_size):
+        batch_size = context.size(1)
+        h_size = (batch_size, rnn_size)
+        self.input_feed = Variable(context.data.new(*h_size).zero_(),
+                                   requires_grad=False).unsqueeze(0)
+        self.all = (self.hidden[0],) + (self.input_feed,)
+
+    def _resetAll(self, all):
+        vars = [Variable(a.data if isinstance(a, Variable) else a,
+                         volatile=True) for a in all]
+        self.hidden = None
+        self.input_feed = vars[-1]
+        self.all = (vars[0],) + (self.input_feed,)
 
 
 class TransformerDecoderState(DecoderState):
