@@ -132,7 +132,7 @@ parser.add_argument('-learning_rate_decay', type=float, default=0.5,
                     this much if (i) perplexity does not decrease on the
                     validation set or (ii) epoch has gone past
                     start_decay_at""")
-parser.add_argument('-start_decay_at', type=int, default=8,
+parser.add_argument('-start_decay_at', type=int, default=30,
                     help="""Start decaying every epoch after and including this
                     epoch""")
 parser.add_argument('-start_checkpoint_at', type=int, default=0,
@@ -166,14 +166,14 @@ parser.add_argument('-log_server', type=str, default="",
 parser.add_argument('-experiment_name', type=str, default="",
                     help="Name of the experiment for logging.")
 
-parser.add_argument('-seed', type=int, default=-1,
+parser.add_argument('-seed', type=int, default=1111,
                     help="""Random seed used for the experiments
                     reproducibility.""")
 
 # DNC arguments
-parser.add_argument('--nr_cells', type=int, default=4, help='Number of memory cells of the DNC')
-parser.add_argument('--read_heads', type=int, default=4, help='Number of read heads of the DNC')
-parser.add_argument('--cell_size', type=int, default=500, help='Cell sizes of DNC')
+parser.add_argument('-nr_cells', type=int, default=4, help='Number of memory cells of the DNC')
+parser.add_argument('-read_heads', type=int, default=4, help='Number of read heads of the DNC')
+parser.add_argument('-cell_size', type=int, default=500, help='Cell sizes of DNC')
 
 opt = parser.parse_args()
 
