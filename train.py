@@ -127,12 +127,12 @@ parser.add_argument('-learning_rate', type=float, default=1.0,
                     used, then this is the global learning rate. Recommended
                     settings: sgd = 1, adagrad = 0.1,
                     adadelta = 1, adam = 0.001""")
-parser.add_argument('-learning_rate_decay', type=float, default=0.5,
+parser.add_argument('-learning_rate_decay', type=float, default=0.75,
                     help="""If update_learning_rate, decay learning rate by
                     this much if (i) perplexity does not decrease on the
                     validation set or (ii) epoch has gone past
                     start_decay_at""")
-parser.add_argument('-start_decay_at', type=int, default=30,
+parser.add_argument('-start_decay_at', type=int, default=8,
                     help="""Start decaying every epoch after and including this
                     epoch""")
 parser.add_argument('-start_checkpoint_at', type=int, default=0,

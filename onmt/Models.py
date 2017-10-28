@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 import onmt
 import onmt.modules
-from onmt.modules import DNC
+from dnc import DNC
 from onmt.modules import aeq
 from onmt.modules.Gate import ContextGateFactory
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
@@ -159,8 +159,9 @@ class Encoder(nn.Module):
         else:
             if opt.rnn_type == 'DNC':
                 self.rnn = DNC(
-                    'lstm',
+                    input_size=input_size,
                     hidden_size=self.hidden_size,
+                    rnn_type='lstm',
                     num_layers=opt.layers,
                     nr_cells=opt.nr_cells,
                     read_heads=opt.read_heads,
@@ -254,8 +255,9 @@ class Decoder(nn.Module):
         else:
             if opt.rnn_type == 'DNC':
                 self.rnn = DNC(
-                    'lstm',
+                    input_size=input_size,
                     hidden_size=input_size,
+                    rnn_type='lstm',
                     num_layers=opt.layers,
                     nr_cells=opt.nr_cells,
                     read_heads=opt.read_heads,
@@ -375,29 +377,30 @@ class Decoder(nn.Module):
                 rnn_output, hidden = self.rnn(emb_t, hidden)
                 if self.rnn_type == 'DNC':
                     rnn_output = rnn_output.squeeze(0)
-                attn_output, attn = self.attn(rnn_output,
-                                              context.transpose(0, 1))
+
+                # attn_output, attn = self.attn(rnn_output,
+                #                               context.transpose(0, 1))
                 if self.context_gate is not None:
                     output = self.context_gate(
                         emb_t, rnn_output, attn_output
                     )
                     output = self.dropout(output)
                 else:
-                    output = self.dropout(attn_output)
+                    output = self.dropout(rnn_output)
                 outputs += [output]
-                attns["std"] += [attn]
+                # attns["std"] += [attn]
 
                 # COVERAGE
-                if self._coverage:
-                    coverage = coverage + attn \
-                               if coverage is not None else attn
-                    attns["coverage"] += [coverage]
+                # if self._coverage:
+                #     coverage = coverage + attn \
+                #                if coverage is not None else attn
+                #     attns["coverage"] += [coverage]
 
                 # COPY
-                if self._copy:
-                    _, copy_attn = self.copy_attn(output,
-                                                  context.transpose(0, 1))
-                    attns["copy"] += [copy_attn]
+                # if self._copy:
+                #     _, copy_attn = self.copy_attn(output,
+                #                                   context.transpose(0, 1))
+                #     attns["copy"] += [copy_attn]
             if self.rnn_type == 'DNC':
                 state = DNCDecoderState(hidden, output.unsqueeze(0),
                                     coverage.unsqueeze(0)
@@ -407,8 +410,8 @@ class Decoder(nn.Module):
                                         coverage.unsqueeze(0)
                                         if coverage is not None else None)
             outputs = torch.stack(outputs)
-            for k in attns:
-                attns[k] = torch.stack(attns[k])
+            # for k in attns:
+            #     attns[k] = torch.stack(attns[k])
         return outputs, state, attns
 
 
@@ -441,6 +444,7 @@ class NMTModel(nn.Module):
                         tuple([ torch.cat((x, Variable(x.data.new(x.size()).zero_(), requires_grad=False)), -1) \
                             for x in enc_hidden[0] ])
                     enc_hidden = (enc_controller_hidden, enc_hidden[1], enc_hidden[2])
+                enc_hidden = (enc_hidden[0], enc_hidden[1], None) # pass controller and memory state
                 dec = DNCDecoderState(enc_hidden)
             else:
                 dec = RNNDecoderState(tuple([self._fix_enc_hidden(enc_hidden[i])
@@ -532,13 +536,17 @@ class DNCDecoderState(DecoderState):
         self.coverage = coverage
         self.all = (self.hidden[0],) + (self.input_feed,)
 
-    def detach(self):
-        for h in self.all:
-            if h is not None:
-                if type(h) is tuple:
-                    tuple([ x.detach_() for x in h ])
-                else:
-                    h.detach_()
+    def detach(self, h=None):
+        if h is None: h = self.all
+        if h is not None:
+            if type(h) is tuple:
+                tuple([ self.detach(x) for x in h ])
+            elif type(h) is list:
+                [ self.detach(x) for x in h ]
+            elif type(h) is Variable:
+                h.detach_()
+            else:
+                raise Exception('What the fuck is this, cannot detach')
 
     def init_input_feed(self, context, rnn_size):
         batch_size = context.size(1)
