@@ -10,6 +10,8 @@ from onmt.modules.Gate import ContextGateFactory
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 
+import numpy as np
+
 class Embeddings(nn.Module):
     def __init__(self, opt, dicts, feature_dicts=None):
         super(Embeddings, self).__init__()
@@ -136,6 +138,9 @@ class Encoder(nn.Module):
         self.layers = opt.layers
         self.rnn_type = opt.rnn_type
 
+        # probablity of passing through memory
+        self.p = opt.memory_regularization if opt.memory_regularization else 1.0
+
         # Use a bidirectional model.
         assert not (opt.rnn_type == 'DNC' and opt.brnn), 'DNC cannot be bidirectional'
         self.num_directions = 2 if opt.brnn else 1
@@ -162,12 +167,13 @@ class Encoder(nn.Module):
                     input_size=input_size,
                     hidden_size=self.hidden_size,
                     rnn_type='lstm',
-                    num_layers=opt.layers,
+                    num_hidden_layers=opt.layers,
                     nr_cells=opt.nr_cells,
                     read_heads=opt.read_heads,
                     cell_size=opt.cell_size,
                     gpu_id=opt.gpus[0],
-                    independent_linears=True,
+                    independent_linears=False,
+                    dropout=opt.dropout,
                     batch_first=False
                 )
             else:
@@ -176,6 +182,9 @@ class Encoder(nn.Module):
                      num_layers=opt.layers,
                      dropout=opt.dropout,
                      bidirectional=opt.brnn)
+
+    def _pass_through_memory(self, p):
+        return np.random.choice([True, False], p=[p, 1.0-p])
 
     def forward(self, input, lengths=None, hidden=None):
         """
@@ -218,7 +227,10 @@ class Encoder(nn.Module):
                 # Lengths data is wrapped inside a Variable.
                 lengths = lengths.data.view(-1).tolist()
                 packed_emb = pack(emb, lengths)
-            outputs, hidden_t = self.rnn(packed_emb, hidden)
+            if self.rnn_type == 'DNC':
+                outputs, hidden_t = self.rnn(packed_emb, hidden, pass_through_memory=self._pass_through_memory(self.p))
+            else:
+                outputs, hidden_t = self.rnn(packed_emb, hidden)
             if lengths is not None and self.rnn_type != 'DNC':
                 outputs = unpack(outputs)[0]
             return hidden_t, outputs
@@ -245,6 +257,9 @@ class Decoder(nn.Module):
         if self.input_feed:
             input_size += opt.rnn_size
 
+        # probablity of passing through memory
+        self.p = opt.memory_regularization if opt.memory_regularization else 1.0
+
         super(Decoder, self).__init__()
         self.embeddings = Embeddings(opt, dicts, None)
 
@@ -258,12 +273,13 @@ class Decoder(nn.Module):
                     input_size=input_size,
                     hidden_size=input_size,
                     rnn_type='lstm',
-                    num_layers=opt.layers,
+                    num_hidden_layers=opt.layers,
                     nr_cells=opt.nr_cells,
                     read_heads=opt.read_heads,
                     cell_size=opt.cell_size,
                     gpu_id=opt.gpus[0],
-                    independent_linears=True,
+                    independent_linears=False,
+                    dropout=opt.dropout,
                     batch_first=False
                 )
             else:
@@ -294,6 +310,9 @@ class Decoder(nn.Module):
             self.copy_attn = onmt.modules.GlobalAttention(
                 opt.rnn_size, attn_type=opt.attention_type)
             self._copy = True
+
+    def _pass_through_memory(self, p):
+        return np.random.choice([True, False], p=[p, 1.0-p])
 
     def forward(self, input, src, context, state):
         """
@@ -374,33 +393,35 @@ class Decoder(nn.Module):
 
                 if self.rnn_type == 'DNC':
                     emb_t = emb_t.unsqueeze(0)
-                rnn_output, hidden = self.rnn(emb_t, hidden)
+                    rnn_output, hidden = self.rnn(emb_t, hidden, pass_through_memory=self._pass_through_memory(self.p))
+                else:
+                    rnn_output, hidden = self.rnn(emb_t, hidden)
                 if self.rnn_type == 'DNC':
                     rnn_output = rnn_output.squeeze(0)
 
-                # attn_output, attn = self.attn(rnn_output,
-                #                               context.transpose(0, 1))
+                attn_output, attn = self.attn(rnn_output,
+                                              context.transpose(0, 1))
                 if self.context_gate is not None:
                     output = self.context_gate(
                         emb_t, rnn_output, attn_output
                     )
                     output = self.dropout(output)
                 else:
-                    output = self.dropout(rnn_output)
+                    output = self.dropout(attn_output)
                 outputs += [output]
-                # attns["std"] += [attn]
+                attns["std"] += [attn]
 
                 # COVERAGE
-                # if self._coverage:
-                #     coverage = coverage + attn \
-                #                if coverage is not None else attn
-                #     attns["coverage"] += [coverage]
+                if self._coverage:
+                    coverage = coverage + attn \
+                               if coverage is not None else attn
+                    attns["coverage"] += [coverage]
 
                 # COPY
-                # if self._copy:
-                #     _, copy_attn = self.copy_attn(output,
-                #                                   context.transpose(0, 1))
-                #     attns["copy"] += [copy_attn]
+                if self._copy:
+                    _, copy_attn = self.copy_attn(output,
+                                                  context.transpose(0, 1))
+                    attns["copy"] += [copy_attn]
             if self.rnn_type == 'DNC':
                 state = DNCDecoderState(hidden, output.unsqueeze(0),
                                     coverage.unsqueeze(0)
@@ -410,8 +431,8 @@ class Decoder(nn.Module):
                                         coverage.unsqueeze(0)
                                         if coverage is not None else None)
             outputs = torch.stack(outputs)
-            # for k in attns:
-            #     attns[k] = torch.stack(attns[k])
+            for k in attns:
+                attns[k] = torch.stack(attns[k])
         return outputs, state, attns
 
 
@@ -437,14 +458,7 @@ class NMTModel(nn.Module):
             return TransformerDecoderState()
         elif self.decoder.rnn_type == 'DNC':
             if self.encoder.rnn_type == 'DNC':
-                if self.opt.input_feed:
-                    # todo: we assume here that the encoder's output size would be
-                    # same as decoder output size
-                    enc_controller_hidden = \
-                        tuple([ torch.cat((x, Variable(x.data.new(x.size()).zero_(), requires_grad=False)), -1) \
-                            for x in enc_hidden[0] ])
-                    enc_hidden = (enc_controller_hidden, enc_hidden[1], enc_hidden[2])
-                enc_hidden = (enc_hidden[0], enc_hidden[1], None) # pass controller and memory state
+                enc_hidden = (None, enc_hidden[1], None) # pass only memory state
                 dec = DNCDecoderState(enc_hidden)
             else:
                 dec = RNNDecoderState(tuple([self._fix_enc_hidden(enc_hidden[i])
