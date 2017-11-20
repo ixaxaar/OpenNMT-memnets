@@ -12,9 +12,12 @@ class Optim(object):
             self.optimizer = optim.Adagrad(self.params, lr=self.lr)
         elif self.method == 'adadelta':
             self.optimizer = optim.Adadelta(self.params, lr=self.lr)
+        elif self.method == 'rmsprop':
+            self.optimizer = optim.RMSprop(self.params, lr=self.lr, eps=1e-10)
         elif self.method == 'adam':
-            self.optimizer = optim.Adam(self.params, lr=self.lr,
-                                        betas=self.betas, eps=1e-9)
+            self.optimizer = optim.Adam(self.params, lr=self.lr)
+        elif self.method == 'adamax':
+            self.optimizer = optim.Adamax(self.params, lr=self.lr, betas=self.betas, eps=1e-9)
         else:
             raise RuntimeError("Invalid optim method: " + self.method)
 
