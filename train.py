@@ -100,12 +100,14 @@ parser.add_argument('-param_init', type=float, default=0.1,
                     with support (-param_init, param_init).
                     Use 0 to not use initialization""")
 parser.add_argument('-optim', default='sgd',
-                    help="Optimization method. [sgd|adagrad|adadelta|adam]")
+                    help="Optimization method. [sgd|adagrad|adadelta|adam|rmsprop]")
 parser.add_argument('-max_grad_norm', type=float, default=5,
                     help="""If the norm of the gradient vector exceeds this,
                     renormalize it to have the norm equal to max_grad_norm""")
 parser.add_argument('-dropout', type=float, default=0.3,
                     help='Dropout probability; applied between LSTM stacks.')
+parser.add_argument('-memory_regularization', type=float, default=0.5,
+                    help='Probability of passing through memory.')
 parser.add_argument('-position_encoding', action='store_true',
                     help='Use a sinusoid to mark relative words positions.')
 parser.add_argument('-share_decoder_embeddings', action='store_true',
@@ -468,6 +470,7 @@ def main():
 
     check_model_path()
 
+    print(model)
     trainModel(model, trainData, validData, dataset, optim)
 
 
