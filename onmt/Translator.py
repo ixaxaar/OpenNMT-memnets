@@ -34,7 +34,7 @@ class Translator(object):
             encoder = onmt.modules.ImageEncoder(model_opt)
 
         decoder = onmt.Models.Decoder(model_opt, self.tgt_dict)
-        model = onmt.Models.NMTModel(encoder, decoder)
+        model = onmt.Models.NMTModel(encoder, decoder, opt)
 
         if not self.copy_attn or self.copy_attn == "std":
             generator = nn.Sequential(
@@ -106,9 +106,12 @@ class Translator(object):
         batchSize = batch.batchSize
 
         #  (1) run the encoder on the src
-        encStates, context = self.model.encoder(
+        rnnstate, context = self.model.encoder(
             batch.src, lengths=batch.lengths)
-        encStates = self.model.init_decoder_state(context, encStates)
+        encStates = self.model.init_decoder_state(context, rnnstate)
+        # save the encoder controller state for beam search
+        if self.model.encoder.rnn_type == 'DNC':
+            encStates.all = encStates.rnnstate[0][-1] + (encStates.input_feed,)
 
         decoder = self.model.decoder
         attentionLayer = decoder.attn
@@ -165,6 +168,10 @@ class Translator(object):
             input = Variable(input, volatile=True)
             decOut, decStates, attn = self.model.decoder(input, batch_src,
                                                          context, decStates)
+            # save the decoder hidden state cause this is a manual unroll
+            if self.model.encoder.rnn_type == 'DNC':
+                decStates.all = decStates.rnnstate[0][-1] + (decStates.input_feed,)
+                decStates.hidden = decStates.rnnstate
             decOut = decOut.squeeze(0)
             # decOut: (beam*batch) x numWords
             attn["std"] = attn["std"].view(beamSize, batchSize, -1) \

@@ -143,8 +143,47 @@ python train.py -rnn_size 700 -word_vec_size 700 -data data/multi30k.atok.low.tr
 # cell sizes 100
 python train.py -data data/multi30k.atok.low.train.pt -batch_size 100 -rnn_type DNC -nr_cells 100 -cell_size 100 -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 5 -save_model test -epochs 15 -gpus 0
 
-# no pass through memory - 71.6292  /
-python train.py -data data/multi30k.atok.low.train.pt -batch_size 100 -rnn_type DNC -nr_cells 100 -cell_size 50 -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 3 -save_model test -epochs 50 -gpus 0
+# no pass through memory dropout
+for (( i = 1; i < 10; i++ )); do
+  python train.py -memory_regularization $((i*0.1)) -data data/multi30k.atok.low.train.pt -batch_size 100 -rnn_type DNC -nr_cells 100 -cell_size 50 -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 5 -save_model mem_drop_$((i*0.1)) -epochs 15 -gpus 1 > mem_drop_$((i*0.1)).log
+done
+
+i=0
+python train.py -memory_regularization $((i*0.1)) -data data/multi30k.atok.low.train.pt -batch_size 100 -rnn_type DNC -nr_cells 100 -cell_size 50 -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 5 -save_model mem_drop_$((i*0.1)) -epochs 20 -gpus 1 > mem_drop_$((i*0.1)).log
+
+# hidden size
+for (( i = 1; i < 10; i++ )); do
+  python train.py -rnn_size $((i*100)) -word_vec_size $((i*100)) -memory_regularization 1.0 -data data/multi30k.atok.low.train.pt -batch_size 100 -rnn_type DNC -nr_cells 100 -cell_size 50 -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 5 -save_model hidden_$((i*100)) -epochs 15 -gpus 0 > hidden_$((i*100)).log
+done
+
+# nr_cells x cell_size
+for (( i = 1; i < 10; i++ )); do
+  for (( j = 1; j < 10; j++ )); do
+    python train.py -data data/multi30k.atok.low.train.pt -batch_size 64 -rnn_type DNC -nr_cells $((i*20)) -cell_size $((j*10)) -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 12 -save_model nr_cells_$((i*20))_cell_size_$((j*10)) -epochs 20 -gpus 1 > nr_cells_$((i*20))_cell_size_$((j*10)).log
+  done
+done
+
+# 2x100, 2x200 failed
+# layers x rnn_size
+for (( i = 2; i < 5; i++ )); do
+  for (( j = 1; j < 7; j++ )); do
+    python train.py -layers $i -rnn_size $((j*100)) -word_vec_size $((j*100)) -data data/multi30k.atok.low.train.pt -batch_size 64 -rnn_type DNC -nr_cells 100 -cell_size 50 -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 12 -save_model layers_$((i))_rnn_size_$((j*100)) -epochs 20 -gpus 0 > layers_$((i))_rnn_size_$((j*100)).log
+  done
+done
+
+python train.py -data data/multi30k.atok.low.train.pt -layers 1 -rnn_size 200 -word_vec_size 200 -save_model multi30k_baseline -gpus 0 -optim adadelta -learning_rate 1 -start_decay_at 7
+
+# todo:
+
+# nr_cells x cell_size resource constrained
+for (( i = 1; i < 10; i++ )); do
+  for (( j = 1; j < 10; j++ )); do
+    python train.py -layers 1 -rnn_size 200 -word_vec_size 200 -data data/multi30k.atok.low.train.pt -batch_size 64 -rnn_type DNC -nr_cells $((i*20)) -cell_size $((j*10)) -read_heads 2 -optim adadelta -learning_rate 1 -start_decay_at 7 -save_model nr_cells_$((i*20))_cell_size_$((j*10)) -epochs 15 -gpus 1 > nr_cells_$((i*20))_cell_size_$((j*10)).log
+  done
+done
+
+# explore dropout
+
 
 
 # WMT

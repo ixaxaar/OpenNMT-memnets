@@ -215,7 +215,7 @@ class Encoder(nn.Module):
             return (mean, mean), emb
 
         elif self.encoder_layer == "transformer":
-            # Self-attention tranformer.
+            # Self-attention transformer.
             out = emb.transpose(0, 1).contiguous()
             for i in range(self.layers):
                 out = self.transformer[i](out, input[:, :, 0].transpose(0, 1))
@@ -314,7 +314,7 @@ class Decoder(nn.Module):
     def _pass_through_memory(self, p):
         return np.random.choice([True, False], p=[p, 1.0-p])
 
-    def forward(self, input, src, context, state):
+    def forward(self, input, src, context, state, reset_experience=False):
         """
         Forward through the decoder.
 
@@ -393,7 +393,9 @@ class Decoder(nn.Module):
 
                 if self.rnn_type == 'DNC':
                     emb_t = emb_t.unsqueeze(0)
-                    rnn_output, hidden = self.rnn(emb_t, hidden, pass_through_memory=self._pass_through_memory(self.p))
+                    rnn_output, hidden = self.rnn(emb_t, hidden, \
+                        pass_through_memory=self._pass_through_memory(self.p), \
+                        reset_experience=reset_experience)
                 else:
                     rnn_output, hidden = self.rnn(emb_t, hidden)
                 if self.rnn_type == 'DNC':
@@ -458,7 +460,6 @@ class NMTModel(nn.Module):
             return TransformerDecoderState()
         elif self.decoder.rnn_type == 'DNC':
             if self.encoder.rnn_type == 'DNC':
-                enc_hidden = (None, enc_hidden[1], None) # pass only memory state
                 dec = DNCDecoderState(enc_hidden)
             else:
                 dec = RNNDecoderState(tuple([self._fix_enc_hidden(enc_hidden[i])
@@ -545,10 +546,11 @@ class DNCDecoderState(DecoderState):
     def __init__(self, rnnstate, input_feed=None, coverage=None):
         # all objects are X x batch x dim
         # or X x (beam * sent) for beam search
-        self.hidden = rnnstate
+        self.hidden = (None, rnnstate[1], None) # pass only memory hidden
+        self.rnnstate = rnnstate
         self.input_feed = input_feed
         self.coverage = coverage
-        self.all = (self.hidden[0],) + (self.input_feed,)
+        self.all = rnnstate[0][-1] + (self.input_feed,)
 
     def detach(self, h=None):
         if h is None: h = self.all
@@ -562,6 +564,18 @@ class DNCDecoderState(DecoderState):
             else:
                 raise Exception('What the fuck is this, cannot detach')
 
+    def reset(self, h=None):
+        if type(h) is tuple:
+            return tuple([ self.detach(x) for x in h ])
+        elif type(h) is list:
+            return [ self.detach(x) for x in h ]
+        elif type(h) is Variable:
+            return Variable(h.data)
+        elif type(h) is torch.Tensor:
+            return h
+        else:
+            raise Exception('What the fuck is this, cannot detach')
+
     def init_input_feed(self, context, rnn_size):
         batch_size = context.size(1)
         h_size = (batch_size, rnn_size)
@@ -570,11 +584,10 @@ class DNCDecoderState(DecoderState):
         self.all = (self.hidden[0],) + (self.input_feed,)
 
     def _resetAll(self, all):
-        vars = [Variable(a.data if isinstance(a, Variable) else a,
-                         volatile=True) for a in all]
+        vars = [self.reset(a) for a in all]
         self.hidden = None
         self.input_feed = vars[-1]
-        self.all = (vars[0],) + (self.input_feed,)
+        self.all = vars
 
 
 class TransformerDecoderState(DecoderState):
